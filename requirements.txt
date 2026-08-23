@@ -21,3 +21,7 @@ huggingface_hub==0.36.2
 tokenizers==0.19.1
 
 pytest==9.0.2
+
+# Linting. CI installs this pin directly rather than the whole file, so bump the
+# version here and in .github/workflows/ci.yml together.
+ruff==0.14.2

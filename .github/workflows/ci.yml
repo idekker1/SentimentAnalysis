@@ -1,6 +1,6 @@
 name: CI
 
-# Runs the test suite on anything heading into main.
+# Runs the linter and the test suite on anything heading into main.
 #
 #   pull_request: every push to a PR branch targeting main. This is the run that
 #     gates the merge — make it a required check in the branch protection rules
@@ -20,6 +20,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Its own job rather than a step in `test`, because ruff needs none of the model
+  # dependencies: this reports a syntax slip or an unused import in seconds instead
+  # of waiting on the ~2 GB of installs and model weights the test job pays for.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        # Pinned so that a ruff release cannot fail a build that changed nothing.
+        # Same version as requirements.txt; bump both together.
+        run: pip install ruff==0.14.2
+
+      # Ruff's default rules only: the obvious errors, not a style opinion.
+      - name: Lint
+        run: ruff check .
+
   test:
     runs-on: ubuntu-latest
     # The suite downloads and runs distilbert, gpt2 and t5-base for real. With a
