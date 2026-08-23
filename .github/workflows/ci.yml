@@ -1,0 +1,68 @@
+name: CI
+
+# Runs the test suite on anything heading into main.
+#
+#   pull_request: every push to a PR branch targeting main. This is the run that
+#     gates the merge — make it a required check in the branch protection rules
+#     and GitHub will not let a red PR be merged.
+#   push: the commit that actually lands on main, so a merge of two individually
+#     green branches still gets verified as a combination.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A second push to the same PR makes the in-flight run obsolete; cancel it
+# instead of paying for both. Runs on main are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite downloads and runs distilbert, gpt2 and t5-base for real. With a
+    # warm model cache it is a few minutes; the very first run pays for ~1.6 GB
+    # of weights, so allow well over the default expectation before giving up.
+    timeout-minutes: 30
+
+    env:
+      # transformers looks for TensorFlow on import. It is not installed here,
+      # and skipping the probe keeps the log free of the resulting warnings.
+      USE_TF: "0"
+      # Pin the Hugging Face cache to a fixed path so the cache step below can
+      # find it regardless of how the runner sets HOME.
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"  # torch 2.3.1 ships no wheels for 3.13+
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HF_HOME }}
+          # Keyed on the source file that names the checkpoints, so adding or
+          # swapping a model re-populates the cache instead of silently reusing
+          # a stale one. restore-keys still gives the new run a warm start from
+          # the previous cache while it fetches only what changed.
+          key: hf-${{ runner.os }}-${{ hashFiles('src/sentiment_analyzer.py') }}
+          restore-keys: hf-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU wheel first: requirements.txt pins the same version, so the
+          # later install sees it satisfied and does not pull the CUDA build.
+          pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest
