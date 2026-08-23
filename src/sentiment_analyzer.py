@@ -3,9 +3,6 @@
 Wraps the workflow from ``notebooks/Analysis.ipynb`` in a single class: inspect an
 input CSV, format it into features and (optionally) targets, and score it with one
 of four sentiment models.
-
-Structure only for now: every method carries its signature and docstring, and
-raises :class:`NotImplementedError`.
 """
 
 from __future__ import annotations
@@ -30,6 +27,24 @@ import pandas as pd
 LABELS: tuple[str, str] = ("negative", "positive")
 
 
+def _select_device() -> str:
+    """Pick the torch device the notebook would have used.
+
+    The notebook hard-codes ``"mps"``; this keeps that choice where it is available
+    and degrades to CUDA or CPU elsewhere, so the class is not Apple-only.
+
+    Returns:
+        A device string accepted by ``transformers`` and :meth:`torch.Tensor.to`.
+    """
+    import torch
+
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 class SentimentModel(str, Enum):
     """The four models compared in the notebook.
 
@@ -45,46 +60,38 @@ class SentimentModel(str, Enum):
 
 @dataclass(frozen=True)
 class DatasetSchema:
-    """Everything :meth:`SentimentAnalyzer.check_data` learned about an input file.
+    """What :meth:`SentimentAnalyzer.check_data` read off an input file.
 
-    Passed forward so that :meth:`SentimentAnalyzer.format_data` and
-    :meth:`SentimentAnalyzer.predict` never have to re-inspect the file.
+    The file's layout is fixed (see :class:`SentimentAnalyzer`), so this carries
+    only what varies between files: the shape of the data and whether it is
+    labelled.
 
     Attributes:
         path: The CSV that was inspected.
-        delimiter: Detected field separator (``;`` for the bundled IMDB sample).
-        encoding: Detected text encoding (``cp1252`` for the bundled sample).
         columns: Column names as they appear in the file.
-        review_column: The column holding the review text.
-        label_column: The column holding the ground-truth sentiment, or ``None``
-            when the file is unlabelled (reviews only).
         n_rows: Number of data rows.
         n_missing: Count of missing values per column.
         n_duplicates: Number of fully duplicated rows.
+        has_labels: Whether the file carries ground-truth sentiment alongside the
+            reviews. This is the switch that decides whether the dataset can be
+            scored or only predicted on.
     """
 
     path: Path
-    delimiter: str
-    encoding: str
     columns: list[str]
-    review_column: str
-    label_column: str | None
     n_rows: int
     n_missing: dict[str, int]
     n_duplicates: int
-
-    @property
-    def has_labels(self) -> bool:
-        """Whether the file carries ground-truth sentiment alongside the reviews.
-
-        This is the switch that decides whether the dataset can be scored or only
-        predicted on.
-        """
-        raise NotImplementedError
+    has_labels: bool
 
 
 class SentimentAnalyzer:
     """Loads a review CSV and scores it with one of four sentiment models.
+
+    The input is expected in the format of the bundled IMDB sample: semicolon
+    separated, cp1252 encoded, with the review text under :attr:`REVIEW_COLUMN` and
+    its label, when present, under :attr:`LABEL_COLUMN`. Point the class at another
+    layout by overriding those four attributes on a subclass.
 
     Intended call order is :meth:`check_data`, :meth:`format_data`, then
     :meth:`predict`; each step stores its result on the instance and the next step
@@ -102,23 +109,17 @@ class SentimentAnalyzer:
 
     LABELS: tuple[str, str] = LABELS
 
-    # Header names accepted for each role, matched case-insensitively and in this
-    # order of preference.
-    REVIEW_COLUMN_CANDIDATES: tuple[str, ...] = ("review", "reviews", "text", "content")
-    LABEL_COLUMN_CANDIDATES: tuple[str, ...] = (
-        "sentiment",
-        "label",
-        "y_target",
-        "target",
-    )
+    # The input format, taken as given rather than detected: the same semicolon
+    # separator, cp1252 encoding and column names the notebook hard-codes in cell 1.
+    DELIMITER: str = ";"
+    ENCODING: str = "cp1252"
+    REVIEW_COLUMN: str = "review"
+    LABEL_COLUMN: str = "sentiment"
 
     DEFAULT_OUTPUT_DIR: Path = Path("notebook_outputs")
 
     # Review text in the IMDB sample contains raw HTML line breaks.
     HTML_BREAK_PATTERN: re.Pattern[str] = re.compile(r"<br\s*/?>")
-
-    # Bytes read from the head of the file when sniffing delimiter and encoding.
-    SNIFF_SAMPLE_SIZE: int = 8192
 
     def __init__(
         self,
@@ -135,19 +136,25 @@ class SentimentAnalyzer:
             output_dir: Directory for CSV exports. Defaults to
                 :attr:`DEFAULT_OUTPUT_DIR`.
         """
-        raise NotImplementedError
+        self.data_path = Path(data_path)
+        self.output_dir = Path(output_dir) if output_dir else self.DEFAULT_OUTPUT_DIR
+
+        self.schema: DatasetSchema | None = None
+        self.raw_data: pd.DataFrame | None = None
+        self.X: pd.Series | None = None
+        self.y_target: pd.Series | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def check_data(self) -> DatasetSchema:
-        """Inspect the input CSV and work out its structure.
+        """Read the input CSV and check it is the dataset this class expects.
 
-        Detects the delimiter and encoding, reads the file, decides which column
-        holds review text and whether a ground-truth label column is present, and
-        counts rows, missing values and duplicates. Stores the frame on
-        :attr:`raw_data` and the schema on :attr:`schema`.
+        Reads the file with the assumed format, confirms the review column is
+        there, notes whether labels came with it, and counts rows, missing values
+        and duplicates. Stores the frame on :attr:`raw_data` and the schema on
+        :attr:`schema`.
 
         Implements notebook cells 1-2.
 
@@ -156,10 +163,27 @@ class SentimentAnalyzer:
 
         Raises:
             FileNotFoundError: If :attr:`data_path` does not exist.
-            ValueError: If the file parses but no column can be identified as
-                review text.
+            ValueError: If the file parses but has no :attr:`REVIEW_COLUMN`.
         """
-        raise NotImplementedError
+        if not self.data_path.is_file():
+            raise FileNotFoundError(f"No such file: {self.data_path}")
+
+        data = pd.read_csv(self.data_path, sep=self.DELIMITER, encoding=self.ENCODING)
+        if self.REVIEW_COLUMN not in data.columns:
+            raise ValueError(
+                f"No {self.REVIEW_COLUMN!r} column in {list(data.columns)}."
+            )
+
+        self.raw_data = data
+        self.schema = DatasetSchema(
+            path=self.data_path,
+            columns=list(data.columns),
+            n_rows=len(data),
+            n_missing={column: int(n) for column, n in data.isna().sum().items()},
+            n_duplicates=int(data.duplicated().sum()),
+            has_labels=self.LABEL_COLUMN in data.columns,
+        )
+        return self.schema
 
     def format_data(self) -> tuple[pd.Series, pd.Series | None]:
         """Format the checked data into features and, when present, targets.
@@ -178,7 +202,16 @@ class SentimentAnalyzer:
             RuntimeError: If :meth:`check_data` has not run.
             ValueError: If the label column holds values outside :attr:`LABELS`.
         """
-        raise NotImplementedError
+        if self.schema is None or self.raw_data is None:
+            raise RuntimeError("check_data() must run before format_data().")
+
+        self.X = self._clean_reviews(self.raw_data[self.REVIEW_COLUMN])
+        self.y_target = (
+            self._normalise_labels(self.raw_data[self.LABEL_COLUMN])
+            if self.schema.has_labels
+            else None
+        )
+        return self.X, self.y_target
 
     def predict(
         self,
@@ -209,58 +242,24 @@ class SentimentAnalyzer:
             RuntimeError: If :meth:`format_data` has not run.
             ValueError: If ``model`` is not a :class:`SentimentModel`.
         """
-        raise NotImplementedError
+        if self.X is None:
+            raise RuntimeError("format_data() must run before predict().")
 
-    # ------------------------------------------------------------------
-    # check_data helpers
-    # ------------------------------------------------------------------
+        # Accepts a member or its plain string value; anything else is a ValueError.
+        model = SentimentModel(model)
 
-    def _detect_delimiter(self, sample: str) -> str:
-        """Sniff the field separator from a sample of the file's first lines.
+        labels, confidences = self._build_dispatch()[model](self.X.tolist())
+        results = self._build_results_frame(labels, confidences)
 
-        Uses :class:`csv.Sniffer`, falling back to ``,`` when it cannot decide.
-        The bundled IMDB sample is semicolon-delimited.
+        if export_csv:
+            destination = (
+                Path(output_path)
+                if output_path
+                else self.output_dir / f"{model.value}_predictions.csv"
+            )
+            self._export_results(results, destination)
 
-        Args:
-            sample: Text read from the head of the file.
-
-        Returns:
-            The delimiter character.
-        """
-        raise NotImplementedError
-
-    def _detect_encoding(self, path: Path) -> str:
-        """Determine the text encoding of the input file.
-
-        Tries UTF-8 first and falls back to ``cp1252``, which is what the bundled
-        IMDB sample is written in.
-
-        Args:
-            path: File to inspect.
-
-        Returns:
-            An encoding name accepted by :func:`pandas.read_csv`.
-        """
-        raise NotImplementedError
-
-    def _identify_columns(self, columns: list[str]) -> tuple[str, str | None]:
-        """Map the file's headers onto the review and label roles.
-
-        Matches against :attr:`REVIEW_COLUMN_CANDIDATES` and
-        :attr:`LABEL_COLUMN_CANDIDATES` case-insensitively. A single-column file is
-        treated as reviews only.
-
-        Args:
-            columns: Header names as read from the file.
-
-        Returns:
-            ``(review_column, label_column)``, with ``label_column`` ``None`` for
-            unlabelled input.
-
-        Raises:
-            ValueError: If no column matches the review role.
-        """
-        raise NotImplementedError
+        return results
 
     # ------------------------------------------------------------------
     # format_data helpers
@@ -275,7 +274,11 @@ class SentimentAnalyzer:
         Returns:
             The cleaned text, index preserved.
         """
-        raise NotImplementedError
+        return (
+            reviews.astype(str)
+            .str.replace(self.HTML_BREAK_PATTERN, " ", regex=True)
+            .str.strip()
+        )
 
     def _normalise_labels(self, labels: pd.Series) -> pd.Series:
         """Lower-case and validate ground-truth labels against :attr:`LABELS`.
@@ -289,7 +292,14 @@ class SentimentAnalyzer:
         Raises:
             ValueError: If any value falls outside :attr:`LABELS`.
         """
-        raise NotImplementedError
+        normalised = labels.astype(str).str.strip().str.lower()
+
+        unexpected = set(normalised.unique()) - set(self.LABELS)
+        if unexpected:
+            raise ValueError(
+                f"Labels outside {list(self.LABELS)}: {sorted(unexpected)}."
+            )
+        return normalised
 
     # ------------------------------------------------------------------
     # Model runners
@@ -317,7 +327,19 @@ class SentimentAnalyzer:
             ``(labels, confidences)``, where each confidence is the probability the
             model assigned to the label it picked.
         """
-        raise NotImplementedError
+        from transformers import pipeline
+
+        classifier = pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+            device=_select_device(),
+        )
+        predictions = classifier(reviews, truncation=True)
+
+        return (
+            [p["label"].lower() for p in predictions],
+            [p["score"] for p in predictions],
+        )
 
     def _predict_vader(self, reviews: list[str]) -> tuple[list[str], list[float]]:
         """Score reviews with the VADER lexicon.
@@ -337,7 +359,17 @@ class SentimentAnalyzer:
             measure of how polarised the wording is, *not* a probability, so it is
             not strictly comparable to the other three models' numbers.
         """
-        raise NotImplementedError
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+        analyzer = SentimentIntensityAnalyzer()
+        # polarity_scores returns {'neg', 'neu', 'pos', 'compound'}; 'compound' is
+        # the normalised [-1, 1] summary score.
+        scores = [analyzer.polarity_scores(review) for review in reviews]
+
+        return (
+            ["positive" if s["compound"] >= 0.05 else "negative" for s in scores],
+            [abs(s["compound"]) for s in scores],
+        )
 
     def _predict_gpt2(self, reviews: list[str]) -> tuple[list[str], list[float]]:
         """Score reviews zero-shot with GPT-2.
@@ -358,7 +390,41 @@ class SentimentAnalyzer:
             ``(labels, confidences)``, the confidence being a softmax over just the
             two label tokens: 0.5 means the model could not separate them.
         """
-        raise NotImplementedError
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        prefix = "Review: "
+        suffix = "\nSentiment (positive or negative):"
+
+        device = _select_device()
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        model = AutoModelForCausalLM.from_pretrained("gpt2").to(device).eval()
+
+        # Written with a leading space both label words are a single token, so one
+        # forward pass per review is enough and no text has to be generated.
+        label_ids = [tokenizer.encode(f" {label}")[0] for label in self.LABELS]
+        max_review_tokens = (
+            1024 - len(tokenizer.encode(prefix)) - len(tokenizer.encode(suffix))
+        )
+
+        labels: list[str] = []
+        confidences: list[float] = []
+        for review in reviews:
+            prompt_ids = (
+                tokenizer.encode(prefix)
+                + tokenizer.encode(review)[:max_review_tokens]
+                + tokenizer.encode(suffix)
+            )
+            with torch.no_grad():
+                logits = model(torch.tensor([prompt_ids], device=device)).logits[0, -1]
+
+            # Softmax over just the two label tokens: this is the model's choice
+            # between them, ignoring every other continuation it could have written.
+            probs = torch.softmax(torch.stack([logits[i] for i in label_ids]), dim=0)
+            labels.append(self.LABELS[int(probs.argmax())])
+            confidences.append(float(probs.max()))
+
+        return labels, confidences
 
     def _predict_t5(self, reviews: list[str]) -> tuple[list[str], list[float]]:
         """Score reviews with T5 as a text-to-text task.
@@ -378,7 +444,39 @@ class SentimentAnalyzer:
             ``(labels, confidences)``, the confidence being a softmax over just the
             two label tokens, on the same scale as :meth:`_predict_gpt2`.
         """
-        raise NotImplementedError
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        prefix = "sst2 sentence: "
+
+        device = _select_device()
+        tokenizer = AutoTokenizer.from_pretrained("t5-base")
+        model = AutoModelForSeq2SeqLM.from_pretrained("t5-base").to(device).eval()
+
+        # Both label words are a single sentencepiece token, so one decoder step is
+        # enough and no text has to be generated.
+        label_ids = [tokenizer(label).input_ids[0] for label in self.LABELS]
+        decoder_start = torch.tensor(
+            [[model.config.decoder_start_token_id]], device=device
+        )
+
+        labels: list[str] = []
+        confidences: list[float] = []
+        for review in reviews:
+            encoded = tokenizer(
+                prefix + review, return_tensors="pt", truncation=True, max_length=512
+            ).to(device)
+
+            # Feed the decoder its start token and read the logits for the first
+            # output word.
+            with torch.no_grad():
+                logits = model(**encoded, decoder_input_ids=decoder_start).logits[0, -1]
+
+            probs = torch.softmax(torch.stack([logits[i] for i in label_ids]), dim=0)
+            labels.append(self.LABELS[int(probs.argmax())])
+            confidences.append(float(probs.max()))
+
+        return labels, confidences
 
     # ------------------------------------------------------------------
     # predict helpers
@@ -390,7 +488,12 @@ class SentimentAnalyzer:
         Returns:
             Model to bound runner method.
         """
-        raise NotImplementedError
+        return {
+            SentimentModel.DISTILBERT: self._predict_distilbert,
+            SentimentModel.VADER: self._predict_vader,
+            SentimentModel.GPT2: self._predict_gpt2,
+            SentimentModel.T5: self._predict_t5,
+        }
 
     def _build_results_frame(
         self,
@@ -416,7 +519,24 @@ class SentimentAnalyzer:
             ValueError: If ``labels`` and ``confidences`` do not match the number
                 of reviews.
         """
-        raise NotImplementedError
+        if len(labels) != len(self.X) or len(confidences) != len(self.X):
+            raise ValueError(
+                f"Expected {len(self.X)} predictions, got {len(labels)} labels "
+                f"and {len(confidences)} confidences."
+            )
+
+        return pd.DataFrame(
+            {
+                "Review": self.X.reset_index(drop=True),
+                "y_target": (
+                    self.y_target.reset_index(drop=True)
+                    if self.y_target is not None
+                    else pd.NA
+                ),
+                "y_pred": labels,
+                "confidence": confidences,
+            }
+        )
 
     def _export_results(self, results: pd.DataFrame, path: Path) -> Path:
         """Write a results frame to CSV, creating the parent directory if needed.
@@ -428,4 +548,6 @@ class SentimentAnalyzer:
         Returns:
             The path written to.
         """
-        raise NotImplementedError
+        path.parent.mkdir(parents=True, exist_ok=True)
+        results.to_csv(path, index=False)
+        return path

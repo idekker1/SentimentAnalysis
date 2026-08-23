@@ -5,21 +5,25 @@ and the cell-by-cell comparison across all four models.
 
 Every public method is a static method taking ``y_target`` and ``y_pred``
 explicitly, so nothing has to be constructed to use it.
-
-Structure only for now: every method carries its signature and docstring, and
-raises :class:`NotImplementedError`.
 """
 
 from __future__ import annotations
 
 from typing import Mapping
 
+import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.axes import Axes
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+)
 
-from sentiment_analyzer import LABELS
+from src.sentiment_analyzer import LABELS
 
 
 class ResultsAnalyzer:
@@ -41,7 +45,7 @@ class ResultsAnalyzer:
     )
 
     # Colour encodes correctness, not model — the model name is already on the axis.
-    CORRECT_COLOR: str = "#2a9d5c"
+    CORRECT_COLOR: str = "#2b9459"
     ERROR_COLOR: str = "#d9534f"
 
     # Plain cells rather than heatmap shading, so matrices for different models can
@@ -78,7 +82,29 @@ class ResultsAnalyzer:
         Raises:
             ValueError: If ``y_target`` and ``y_pred`` differ in length.
         """
-        raise NotImplementedError
+        if len(y_target) != len(y_pred):
+            raise ValueError(
+                f"y_target has {len(y_target)} rows, y_pred has {len(y_pred)}."
+            )
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(3.2, 3.2))
+
+        ConfusionMatrixDisplay.from_predictions(
+            y_target,
+            y_pred,
+            labels=list(labels),
+            ax=ax,
+            cmap=ResultsAnalyzer.PLAIN_CMAP,
+            colorbar=False,
+            # The shading-based text colour would be white on white.
+            text_kw={"color": "black"},
+        )
+        ax.set_ylabel("Actual")
+        if title:
+            ax.set_title(title)
+
+        return ax
 
     @staticmethod
     def calculate_accuracy(
@@ -104,7 +130,17 @@ class ResultsAnalyzer:
             ValueError: If ``y_target`` and ``y_pred`` differ in length, or either
                 is empty.
         """
-        raise NotImplementedError
+        if len(y_target) != len(y_pred):
+            raise ValueError(
+                f"y_target has {len(y_target)} rows, y_pred has {len(y_pred)}."
+            )
+        if len(y_target) == 0:
+            raise ValueError("Cannot score an empty dataset.")
+
+        if print_report:
+            print(classification_report(y_target, y_pred, digits=3))
+
+        return float(accuracy_score(y_target, y_pred))
 
     @classmethod
     def compare_models(
@@ -136,7 +172,46 @@ class ResultsAnalyzer:
                 columns, or the frames do not share an identical ``y_target`` —
                 the comparison is only meaningful against a common ground truth.
         """
-        raise NotImplementedError
+        if not results:
+            raise ValueError("compare_models() needs at least one results frame.")
+
+        y_target: pd.Series | None = None
+        for name, frame in results.items():
+            missing = {"y_target", "y_pred"} - set(frame.columns)
+            if missing:
+                raise ValueError(f"{name!r} is missing column(s) {sorted(missing)}.")
+
+            targets = frame["y_target"].reset_index(drop=True)
+            if y_target is None:
+                y_target = targets
+            elif not targets.equals(y_target):
+                raise ValueError(
+                    f"{name!r} was scored against a different y_target; models can "
+                    "only be compared on a common ground truth."
+                )
+
+        cell_counts = pd.DataFrame(
+            {
+                name: cls._confusion_cells(frame["y_target"], frame["y_pred"])
+                for name, frame in results.items()
+            }
+        )
+        accuracy = pd.DataFrame(
+            {
+                name: [cls.calculate_accuracy(frame["y_target"], frame["y_pred"])]
+                for name, frame in results.items()
+            },
+            index=["accuracy"],
+        )
+
+        if plot:
+            cls._plot_comparison_grid(
+                cell_counts,
+                n_negative=int((y_target == cls.LABELS[0]).sum()),
+                n_positive=int((y_target == cls.LABELS[1]).sum()),
+            )
+
+        return pd.concat([cell_counts, accuracy])
 
     # ------------------------------------------------------------------
     # Helpers
@@ -158,7 +233,11 @@ class ResultsAnalyzer:
         Returns:
             The counts indexed by :attr:`CELL_NAMES`.
         """
-        raise NotImplementedError
+        # confusion_matrix returns [[TN, FP], [FN, TP]] with negative first.
+        return pd.Series(
+            confusion_matrix(y_target, y_pred, labels=list(labels)).ravel(),
+            index=list(ResultsAnalyzer.CELL_NAMES),
+        )
 
     @classmethod
     def _plot_comparison_grid(
@@ -184,4 +263,38 @@ class ResultsAnalyzer:
         Returns:
             The completed figure.
         """
-        raise NotImplementedError
+        cell_color = {
+            "true negative": cls.CORRECT_COLOR,
+            "false positive": cls.ERROR_COLOR,
+            "false negative": cls.ERROR_COLOR,
+            "true positive": cls.CORRECT_COLOR,
+        }
+        titles = {
+            "true negative": f"True negatives (of {n_negative} negative)",
+            "false positive": f"False positives (of {n_negative} negative)",
+            "false negative": f"False negatives (of {n_positive} positive)",
+            "true positive": f"True positives (of {n_positive} positive)",
+        }
+
+        fig, axes = plt.subplots(2, 2, figsize=(8, 6), sharey=True)
+
+        for ax, cell in zip(axes.ravel(), cls.CELL_NAMES):
+            counts = cell_counts.loc[cell]
+            bars = ax.bar(counts.index, counts.values, width=0.6, color=cell_color[cell])
+            ax.bar_label(bars, padding=3, fontsize=9)
+
+            ax.set_title(titles[cell], fontsize=11, loc="left")
+            ax.set_ylim(0, max(n_negative, n_positive) * 1.15)
+            ax.tick_params(axis="both", labelsize=9, length=0)
+            ax.grid(axis="y", color="#e6e5e2", linewidth=0.8)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right", "left"]].set_visible(False)
+            ax.spines["bottom"].set_color("#c3c2b7")
+
+        axes[0, 0].set_ylabel("Reviews")
+        axes[1, 0].set_ylabel("Reviews")
+
+        fig.suptitle("Confusion matrix cell by cell", fontsize=13, x=0.06, ha="left")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+
+        return fig
