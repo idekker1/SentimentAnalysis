@@ -83,6 +83,39 @@ unchanged — because `format_data()` strips the `<br />` tags that 68 of the 10
 carry and the notebook left in. Every prediction that differs is on a review whose text
 that cleanup changed; nothing else moves between the two.
 
+### As an API
+
+`src/api.py` puts a single prediction behind HTTP. Start the server with:
+
+```bash
+uvicorn src.api:app --reload
+```
+
+`GET /health` answers `{"status": "ok"}` without loading anything, so it stays cheap
+to poll. `POST /predict` scores one review:
+
+```bash
+curl -X POST localhost:8000/predict \
+     -H 'Content-Type: application/json' \
+     -d '{"text": "A brilliant, moving film.", "model": "vader"}'
+```
+
+```json
+{"text": "A brilliant, moving film.", "model": "vader", "sentiment": "positive", "confidence": 0.5859}
+```
+
+`model` is optional and defaults to `distilbert`; `text` comes back as the model saw
+it, cleaned the same way `format_data()` cleans a CSV column.
+
+An unknown `model` or a missing `text` comes back as a `422` from FastAPI's own
+validation. Nothing else is checked: whatever `text` holds goes to the model, which
+will label it either way. Interactive docs are at `/docs`.
+
+Both handlers are plain `def` rather than `async def`: FastAPI runs a sync handler in
+its threadpool, so a request that spends seconds inside a model does not block the
+event loop for everyone else. Each request loads its model — VADER answers
+immediately, the transformers pay a load every time and a download the first time.
+
 ## Tests
 
 ```bash
@@ -97,6 +130,6 @@ data/              the review CSV
 notebooks/         the original exploration this code came from
 notebook_outputs/  predictions, one CSV per model
 outputs/           where main.py writes its results (git-ignored)
-src/               SentimentAnalyzer and ResultsAnalyzer
+src/               SentimentAnalyzer, ResultsAnalyzer and the API
 tests/             the test suite
 ```

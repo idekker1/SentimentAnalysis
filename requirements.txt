@@ -20,7 +20,15 @@ vaderSentiment==3.3.2
 huggingface_hub==0.36.2
 tokenizers==0.19.1
 
+# The HTTP front end in src/api.py and the server that runs it.
+fastapi==0.120.0
+uvicorn==0.38.0
+
 pytest==9.0.2
+
+# fastapi's TestClient calls the app through httpx, so the API tests need it
+# even though nothing in src/ imports it.
+httpx==0.28.1
 
 # Linting. CI installs this pin directly rather than the whole file, so bump the
 # version here and in .github/workflows/ci.yml together.
