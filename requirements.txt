@@ -1,0 +1,27 @@
+# Runtime and test dependencies, pinned to the versions the suite is known to
+# pass on. CI installs exactly these; see .github/workflows/ci.yml.
+#
+# torch is listed here for the pin, but CI installs it from PyPI's CPU-only
+# index first — the default Linux wheel drags in ~2 GB of CUDA packages that a
+# GitHub runner has no GPU to use.
+
+pandas==2.3.3
+numpy==1.26.4
+matplotlib==3.7.2
+scikit-learn==1.6.1
+
+torch==2.3.1
+transformers==4.44.0
+vaderSentiment==3.3.2
+
+# transformers pulls these in itself, but leaving them floating means a release
+# on either can break a build that changed nothing. Pinned to the versions the
+# suite passes on locally.
+huggingface_hub==0.36.2
+tokenizers==0.19.1
+
+pytest==9.0.2
+
+# Linting. CI installs this pin directly rather than the whole file, so bump the
+# version here and in .github/workflows/ci.yml together.
+ruff==0.14.2
