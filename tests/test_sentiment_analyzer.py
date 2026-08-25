@@ -38,6 +38,12 @@ class TestCheckData:
     def test_file_without_a_sentiment_column_is_unlabelled(self, unlabelled_csv):
         assert SentimentAnalyzer(unlabelled_csv).check_data().has_labels is False
 
+    def test_an_analyzer_with_no_path_has_nothing_to_check(self):
+        # The in-memory entry point leaves data_path unset; reaching check_data()
+        # on such an analyzer is a caller mistake rather than a missing file.
+        with pytest.raises(RuntimeError, match="No data_path"):
+            SentimentAnalyzer().check_data()
+
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             SentimentAnalyzer(tmp_path / "does_not_exist.csv").check_data()
@@ -151,6 +157,52 @@ class TestPredict:
         analyzer.format_data()
 
         assert analyzer.predict(SentimentModel.VADER)["y_target"].isna().all()
+
+
+class TestPredictTexts:
+    """Scoring review text that never was a file.
+
+    VADER throughout: the route into the models is what is under test here, and
+    the lexicon exercises all of it without loading a transformer.
+    """
+
+    def test_scores_text_passed_straight_in(self):
+        results = SentimentAnalyzer().predict_texts(["A fine film."], SentimentModel.VADER)
+
+        assert list(results.columns) == ["Review", "y_target", "y_pred", "confidence"]
+        assert len(results) == 1
+        assert results["y_pred"].iloc[0] in LABELS
+
+    def test_cleans_text_the_way_format_data_does(self):
+        results = SentimentAnalyzer().predict_texts(
+            ["  Wonderful.<br /><br />The filming is charming.  "], SentimentModel.VADER
+        )
+
+        # Identical treatment to the CSV route, so the same review scored either
+        # way reaches the model as the same string.
+        assert results["Review"].iloc[0] == "Wonderful.  The filming is charming."
+
+    def test_scores_several_reviews_in_order(self):
+        results = SentimentAnalyzer().predict_texts(
+            ["A fine film.", "A dull mess.", "Loved every minute."],
+            SentimentModel.VADER,
+        )
+
+        assert len(results) == 3
+        assert results["Review"].iloc[1] == "A dull mess."
+
+    def test_has_no_targets_to_score_against(self):
+        results = SentimentAnalyzer().predict_texts(["A fine film."], SentimentModel.VADER)
+
+        assert results["y_target"].isna().all()
+
+    def test_empty_input_raises(self):
+        with pytest.raises(ValueError, match="No reviews"):
+            SentimentAnalyzer().predict_texts([], SentimentModel.VADER)
+
+    def test_unknown_model_raises(self):
+        with pytest.raises(ValueError):
+            SentimentAnalyzer().predict_texts(["A fine film."], "bag-of-words")
 
 
 class TestExport:

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import pandas as pd
 
@@ -95,10 +95,13 @@ class SentimentAnalyzer:
 
     Intended call order is :meth:`check_data`, :meth:`format_data`, then
     :meth:`predict`; each step stores its result on the instance and the next step
-    raises :class:`RuntimeError` if the previous one has not run.
+    raises :class:`RuntimeError` if the previous one has not run. Reviews that are
+    already in memory rather than in a file skip all three for
+    :meth:`predict_texts`.
 
     Attributes:
-        data_path: The CSV to analyse.
+        data_path: The CSV to analyse, or ``None`` when the reviews are supplied
+            directly to :meth:`predict_texts` instead of read off disk.
         output_dir: Where :meth:`predict` writes CSV exports by default.
         schema: Result of :meth:`check_data`, ``None`` until it runs.
         raw_data: The frame as read from disk, ``None`` until :meth:`check_data` runs.
@@ -123,7 +126,7 @@ class SentimentAnalyzer:
 
     def __init__(
         self,
-        data_path: str | Path,
+        data_path: str | Path | None = None,
         output_dir: str | Path | None = None,
     ) -> None:
         """Set up the analyzer without touching the filesystem.
@@ -132,11 +135,12 @@ class SentimentAnalyzer:
         analyzer for a missing or malformed file never raises.
 
         Args:
-            data_path: Path to the input CSV.
+            data_path: Path to the input CSV. Optional: callers that go through
+                :meth:`predict_texts` bring their own text and never read a file.
             output_dir: Directory for CSV exports. Defaults to
                 :attr:`DEFAULT_OUTPUT_DIR`.
         """
-        self.data_path = Path(data_path)
+        self.data_path = Path(data_path) if data_path is not None else None
         self.output_dir = Path(output_dir) if output_dir else self.DEFAULT_OUTPUT_DIR
 
         self.schema: DatasetSchema | None = None
@@ -162,9 +166,12 @@ class SentimentAnalyzer:
             The schema describing the file.
 
         Raises:
+            RuntimeError: If the analyzer was built without a ``data_path``.
             FileNotFoundError: If :attr:`data_path` does not exist.
             ValueError: If the file parses but has no :attr:`REVIEW_COLUMN`.
         """
+        if self.data_path is None:
+            raise RuntimeError("No data_path was given; there is no file to check.")
         if not self.data_path.is_file():
             raise FileNotFoundError(f"No such file: {self.data_path}")
 
@@ -260,6 +267,40 @@ class SentimentAnalyzer:
             self._export_results(results, destination)
 
         return results
+
+    def predict_texts(
+        self,
+        reviews: Sequence[str],
+        model: SentimentModel,
+    ) -> pd.DataFrame:
+        """Score review text held in memory, without reading a file.
+
+        The in-memory counterpart to the ``check_data`` / ``format_data`` /
+        ``predict`` sequence, for reviews that never were a CSV — a request body
+        arriving at :mod:`src.api`, say. The text is cleaned exactly as
+        :meth:`format_data` cleans the review column, so the same review scored
+        through either route reaches the model as the same string.
+
+        Text supplied this way carries no ground truth, so :attr:`y_target` is
+        cleared and the ``y_target`` column of the result comes back as ``NA``.
+
+        Args:
+            reviews: Review text, uncleaned.
+            model: Which model to run.
+
+        Returns:
+            The same frame :meth:`predict` returns, one row per review.
+
+        Raises:
+            ValueError: If ``reviews`` is empty, or ``model`` is not a
+                :class:`SentimentModel`.
+        """
+        if len(reviews) == 0:
+            raise ValueError("No reviews to score.")
+
+        self.X = self._clean_reviews(pd.Series(reviews, dtype="object"))
+        self.y_target = None
+        return self.predict(model)
 
     # ------------------------------------------------------------------
     # format_data helpers
