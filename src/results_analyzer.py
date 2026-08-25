@@ -67,8 +67,6 @@ class ResultsAnalyzer:
         reads in the same order as a classification report and several models'
         matrices stay comparable side by side.
 
-        Implements notebook cells 8, 16, 24 and 32.
-
         Args:
             y_target: Ground-truth labels.
             y_pred: Predicted labels.
@@ -115,8 +113,6 @@ class ResultsAnalyzer:
     ) -> float:
         """Compute the accuracy of one model's predictions on a dataset.
 
-        Implements notebook cells 7, 15, 23 and 31.
-
         Args:
             y_target: Ground-truth labels.
             y_pred: Predicted labels.
@@ -155,8 +151,6 @@ class ResultsAnalyzer:
         each model's confusion matrix apart into its four cells, so "which model
         wins" splits into four separate questions — who finds the negative reviews,
         who over-calls positive, who misses positives, who finds them.
-
-        Implements notebook cell 37.
 
         Args:
             results: Model name to its results frame; each must carry ``y_target``

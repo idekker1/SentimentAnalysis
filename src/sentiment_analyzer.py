@@ -119,7 +119,7 @@ class SentimentAnalyzer:
     REVIEW_COLUMN: str = "review"
     LABEL_COLUMN: str = "sentiment"
 
-    DEFAULT_OUTPUT_DIR: Path = Path("notebook_outputs")
+    DEFAULT_OUTPUT_DIR: Path = Path("default_outputs")
 
     # Review text in the IMDB sample contains raw HTML line breaks.
     HTML_BREAK_PATTERN: re.Pattern[str] = re.compile(r"<br\s*/?>")
@@ -160,8 +160,6 @@ class SentimentAnalyzer:
         and duplicates. Stores the frame on :attr:`raw_data` and the schema on
         :attr:`schema`.
 
-        Implements notebook cells 1-2.
-
         Returns:
             The schema describing the file.
 
@@ -199,8 +197,6 @@ class SentimentAnalyzer:
         surrounding whitespace. When :attr:`schema` reports a label column, also
         normalises it into :attr:`y_target`; when the input is reviews only,
         :attr:`y_target` stays ``None`` and the dataset is prediction-only.
-
-        Implements notebook cell 3 plus the cleanup step documented in the README.
 
         Returns:
             ``(X, y_target)``, where ``y_target`` is ``None`` for unlabelled input.
@@ -359,8 +355,6 @@ class SentimentAnalyzer:
         line up with :attr:`LABELS`. Truncation at 512 tokens is required and does
         cut text: 15 of the 100 bundled reviews exceed the window.
 
-        Implements notebook cells 5 and 7.
-
         Args:
             reviews: Cleaned review text.
 
@@ -389,8 +383,6 @@ class SentimentAnalyzer:
         a handful of grammatical rules, and it reads reviews of any length in full.
         VADER's documented rule calls ``compound >= 0.05`` positive; this dataset
         has no neutral class, so everything below that threshold is called negative.
-
-        Implements notebook cells 13 and 15.
 
         Args:
             reviews: Cleaned review text.
@@ -421,8 +413,6 @@ class SentimentAnalyzer:
         logits for the two single-token label words are compared. One forward pass
         per review, no text generated. The 1024-token window fits every bundled
         review, but the cap is kept so a prompt can never overflow it.
-
-        Implements notebook cells 21 and 23.
 
         Args:
             reviews: Cleaned review text.
@@ -475,8 +465,6 @@ class SentimentAnalyzer:
         string t5-base was pretrained to answer for SST-2, not an invented prompt.
         One decoder step is enough; input is truncated at T5's 512-token training
         length, which does cut 21 of the 100 bundled reviews.
-
-        Implements notebook cells 29 and 31.
 
         Args:
             reviews: Cleaned review text.
@@ -545,8 +533,6 @@ class SentimentAnalyzer:
 
         Combines the reviews and (when available) targets held on the instance with
         the predictions just produced.
-
-        Implements the frame construction from notebook cells 10, 18, 26 and 34.
 
         Args:
             labels: Predicted label per review.
